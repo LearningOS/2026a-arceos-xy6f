@@ -30,9 +30,16 @@ _run_guest:
     sd   sp, ({hyp_sp})(a0)
 
     /* Swap in guest CSRs. */
-    ld    t1, ({guest_sstatus})(a0)
-    csrrw t1, sstatus, t1
+    /* Disable interrupts (SIE) and save the host sstatus with SIE cleared,
+       so that no timer interrupt can fire while stvec/sscratch still point
+       at the guest exit path or hold guest values. */
+    li    t2, 2                   /* SIE bit */
+    csrrc t2, sstatus, t2
+    csrr  t1, sstatus             /* re-read the cleared value */
     sd    t1, ({hyp_sstatus})(a0)
+
+    ld    t1, ({guest_sstatus})(a0)
+    csrw  sstatus, t1
 
     ld    t1, ({guest_hstatus})(a0)
     csrrw t1, hstatus, t1
@@ -131,10 +138,6 @@ _guest_exit:
 
 _restore_csrs:
     /* Swap in hypervisor CSRs. */
-    ld    t1, ({hyp_sstatus})(a0)
-    csrrw t1, sstatus, t1
-    sd    t1, ({guest_sstatus})(a0)
-
     csrr  t1, hstatus
     sd    t1, ({guest_hstatus})(a0)
 
@@ -147,6 +150,13 @@ _restore_csrs:
 
     ld    t1, ({hyp_sscratch})(a0)
     csrw  sscratch, t1
+
+    /* Restore the hypervisor sstatus LAST: interrupts stay disabled (the
+       trap cleared SIE, and the saved copy has SIE=0) until stvec and
+       sscratch are already back to the kernel's. */
+    ld    t1, ({hyp_sstatus})(a0)
+    csrrw t1, sstatus, t1
+    sd    t1, ({guest_sstatus})(a0)
 
     /* Save guest EPC. */
     csrr  t1, sepc

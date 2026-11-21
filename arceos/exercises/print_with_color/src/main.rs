@@ -6,5 +6,6 @@ use axstd::println;
 
 #[cfg_attr(feature = "axstd", no_mangle)]
 fn main() {
-    println!("[WithColor]: Hello, Arceos!");
+    // Print the greeting in bold green using ANSI escape sequences.
+    println!("\u{1b}[32;1m[WithColor]: Hello, Arceos!\u{1b}[0m");
 }

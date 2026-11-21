@@ -7,6 +7,8 @@ use axerrno::LinuxError;
 use axtask::current;
 use axtask::TaskExtRef;
 use axhal::paging::MappingFlags;
+use axhal::mem::{MemoryAddr, VirtAddr};
+use memory_addr::VirtAddrRange;
 use arceos_posix_api as api;
 
 const SYS_IOCTL: usize = 29;
@@ -140,7 +142,67 @@ fn sys_mmap(
     fd: i32,
     _offset: isize,
 ) -> isize {
-    unimplemented!("no sys_mmap!");
+    syscall_body!(sys_mmap, {
+        let prot = MmapProt::from_bits_truncate(prot);
+        let flags = MmapFlags::from_bits_truncate(flags);
+        if length == 0 {
+            return Err(LinuxError::EINVAL);
+        }
+
+        const USER_STACK_SIZE: usize = 0x10000;
+
+        let curr = current();
+        let mut uspace = curr.task_ext().aspace.lock();
+
+        // User stack occupies the last USER_STACK_SIZE bytes of the address
+        // space, mapped areas are placed below it.
+        let limit = VirtAddrRange::new(
+            uspace.base(),
+            VirtAddr::from(uspace.end().as_usize() - USER_STACK_SIZE),
+        );
+        let size = length.align_up_4k();
+
+        let hint = if addr as usize == 0 {
+            uspace.base()
+        } else {
+            VirtAddr::from(addr as usize).align_down_4k()
+        };
+        let vaddr = uspace
+            .find_free_area(hint, size, limit)
+            .ok_or(LinuxError::ENOMEM)?;
+        if vaddr.as_usize() + size > limit.end.as_usize() {
+            return Err(LinuxError::ENOMEM);
+        }
+
+        let map_flags = MappingFlags::from(prot);
+        uspace.map_alloc(vaddr, size, map_flags, true)?;
+
+        // File-backed mapping: populate the pages with the file content read
+        // from the current file offset.
+        if !flags.contains(MmapFlags::MAP_ANONYMOUS) && fd >= 0 {
+            let file = api::get_file_like(fd)?;
+            let mut buf = alloc::vec![0u8; size];
+            let mut filled = 0;
+            while filled < size {
+                let n = file.read(&mut buf[filled..])?;
+                if n == 0 {
+                    break;
+                }
+                filled += n;
+            }
+            uspace.write(vaddr, &buf)?;
+        }
+
+        debug!(
+            "sys_mmap: map [{:#x}, {:#x}) prot={:?} flags={:#x} fd={}",
+            vaddr.as_usize(),
+            vaddr.as_usize() + size,
+            map_flags,
+            flags,
+            fd
+        );
+        Ok(vaddr.as_usize())
+    })
 }
 
 fn sys_openat(dfd: c_int, fname: *const c_char, flags: c_int, mode: api::ctypes::mode_t) -> isize {

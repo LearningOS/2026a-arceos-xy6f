@@ -67,6 +67,23 @@ impl DirNode {
         children.remove(name);
         Ok(())
     }
+
+    /// Renames a node in this directory from `src_name` to `dst_name`.
+    ///
+    /// Only rename within the same directory is supported, NOT move.
+    pub fn rename_node(&self, src_name: &str, dst_name: &str) -> VfsResult {
+        check_node_name(src_name)?;
+        check_node_name(dst_name)?;
+        let mut children = self.children.write();
+        let node = children.get(src_name).ok_or(VfsError::NotFound)?.clone();
+        if children.contains_key(dst_name) {
+            log::error!("AlreadyExists {}", dst_name);
+            return Err(VfsError::AlreadyExists);
+        }
+        children.remove(src_name);
+        children.insert(dst_name.into(), node);
+        Ok(())
+    }
 }
 
 impl VfsNodeOps for DirNode {
@@ -165,7 +182,46 @@ impl VfsNodeOps for DirNode {
         }
     }
 
+    fn rename(&self, src_path: &str, dst_path: &str) -> VfsResult {
+        log::debug!("rename at ramfs: {} -> {}", src_path, dst_path);
+        // Only rename (not move) is supported, so the source and the
+        // destination must lie in the same directory. The destination may be
+        // given as an absolute path (it is not rewritten by the caller), thus
+        // only its last component is used as the new name.
+        let (src_name, src_rest) = split_path(src_path);
+        let dst_name = dst_leaf(dst_path);
+        if let Some(src_rest) = src_rest {
+            // The source lies in a subdirectory; delegate to it.
+            let subdir = self
+                .children
+                .read()
+                .get(src_name)
+                .ok_or(VfsError::NotFound)?
+                .clone();
+            subdir.rename(src_rest, dst_name)
+        } else {
+            self.rename_node(src_name, dst_name)
+        }
+    }
+
     axfs_vfs::impl_vfs_dir_default! {}
+}
+
+/// Returns the last component of the given (possibly absolute) path.
+fn dst_leaf(path: &str) -> &str {
+    let trimmed = path.trim_matches('/');
+    match trimmed.rfind('/') {
+        Some(i) => &trimmed[i + 1..],
+        None => trimmed,
+    }
+}
+
+fn check_node_name(name: &str) -> VfsResult {
+    if name.is_empty() || name == "." || name == ".." {
+        Err(VfsError::InvalidInput)
+    } else {
+        Ok(())
+    }
 }
 
 fn split_path(path: &str) -> (&str, Option<&str>) {
